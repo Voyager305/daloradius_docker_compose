@@ -1,0 +1,112 @@
+services:
+  mariadb:
+    image: mariadb:11.4
+    container_name: daloradius-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${MARIADB_DATABASE}
+      MARIADB_USER: ${MARIADB_USER}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+      TZ: ${TZ}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mariadb-admin ping -h 127.0.0.1 -u$$MARIADB_USER -p$$MARIADB_PASSWORD || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - daloradius
+
+  db-init:
+    image: mariadb:11.4
+    container_name: daloradius-db-init
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      daloradius-init:
+        condition: service_completed_successfully
+    restart: "no"
+    environment:
+      MARIADB_HOST: mariadb
+      MARIADB_PORT: 3306
+      MARIADB_DATABASE: ${MARIADB_DATABASE}
+      MARIADB_USER: ${MARIADB_USER}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+      DALORADIUS_SQL_DIR: /var/www/daloradius/contrib/db
+    volumes:
+      - ./scripts/init-db.sh:/init-db.sh:ro
+      - daloradius_app:/var/www/daloradius:ro
+    command: ["/bin/sh", "/init-db.sh"]
+    networks:
+      - daloradius
+
+  daloradius-init:
+    image: alpine/git:2.45.2
+    container_name: daloradius-app-init
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      MARIADB_HOST: mariadb
+      MARIADB_PORT: 3306
+      MARIADB_DATABASE: ${MARIADB_DATABASE}
+      MARIADB_USER: ${MARIADB_USER}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+      DALORADIUS_GIT_REF: ${DALORADIUS_GIT_REF}
+    volumes:
+      - daloradius_app:/var/www/daloradius
+      - ./scripts/init-daloradius.sh:/init-daloradius.sh:ro
+    entrypoint: ["/bin/sh", "/init-daloradius.sh"]
+    networks:
+      - daloradius
+
+  php:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: daloradius-php
+    depends_on:
+      daloradius-init:
+        condition: service_completed_successfully
+      db-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - daloradius_app:/var/www/daloradius
+    networks:
+      - daloradius
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: daloradius-nginx
+    depends_on:
+      php:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "${DALORADIUS_OPERATORS_PORT}:80"
+      - "${DALORADIUS_USERS_PORT}:81"
+    volumes:
+      - daloradius_app:/var/www/daloradius:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - daloradius
+
+volumes:
+  mariadb_data:
+  daloradius_app:
+
+networks:
+  daloradius:
+    driver: bridge
